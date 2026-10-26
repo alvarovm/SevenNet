@@ -5,6 +5,7 @@ cxx_standard=$2 # 14, 17
 d3_support=$3 # 1, 0
 flashTP_so="${4:-NONE}"
 oeq_so="${5:-NONE}"
+d3sycl_support="${6:-0}" # 1, 0 -- pair_d3sycl (SYCL port of pair_d3)
 SCRIPT_DIR=$(dirname "${BASH_SOURCE[0]}")
 enable_flashTP=0
 enable_oeq=0
@@ -14,11 +15,13 @@ enable_oeq=0
 ###########################################
 
 # Check the number of arguments
-if [ "$#" -lt 3 ] || [ "$#" -gt 5 ]; then
-    echo "Usage: sh patch_lammps.sh {lammps_root} {cxx_standard} {d3_support} {flashTP_so} {oeq_so}"
+if [ "$#" -lt 3 ] || [ "$#" -gt 6 ]; then
+    echo "Usage: sh patch_lammps.sh {lammps_root} {cxx_standard} {d3_support} {flashTP_so} {oeq_so} {d3sycl_support}"
     echo "  {lammps_root}: Root directory of LAMMPS source"
     echo "  {cxx_standard}: C++ standard (14, 17)"
-    echo "  {d3_support}: Support for pair_d3 (1, 0)"
+    echo "  {d3_support}: Support for pair_d3, CUDA (1, 0)"
+    echo "  {d3sycl_support}: Support for pair_d3sycl, SYCL (1, 0). Requires a SYCL compiler, such as AdaptiveCpp"
+    echo "                    to be discoverable via CMAKE_PREFIX_PATH at LAMMPS configure time."
     exit 1
 fi
 
@@ -191,6 +194,115 @@ EOF
 
 fi
 
+if [ "$d3_support" -ne 0 ] && [ "$d3sycl_support" -ne 0 ]; then
+    echo "Error: d3_support (CUDA) and d3sycl_support (SYCL) cannot both be enabled"
+    echo "       in the same LAMMPS build. add_sycl_to_target() wraps the whole 'lammps'"
+    echo "       target's compile/link rules, including .cu files compiled by nvcc, which"
+    echo "       conflicts with the CUDA language build used by pair_d3. Patch two separate"
+    echo "       LAMMPS source trees instead, one per backend."
+    exit 1
+fi
+
+###########################################
+# Patch LAMMPS source code: d3sycl        #
+###########################################
+
+if [ "$d3sycl_support" -ne 0 ]; then
+
+# 1. Copy pair_d3sycl files to LAMMPS source
+cp $SCRIPT_DIR/pair_d3sycl.h $lammps_root/src/
+cp $SCRIPT_DIR/pair_d3sycl.cpp $lammps_root/src/
+if [ ! -f "$lammps_root/src/pair_d3_pars.h" ]; then
+    cp $SCRIPT_DIR/pair_d3_pars.h $lammps_root/src/
+fi
+
+# 2. Patch cmake/CMakeLists.txt: link the "lammps" target against SYCL.
+# AdaptiveCpp must be discoverable, e.g. via
+#   -DCMAKE_PREFIX_PATH=/path/to/adaptivecpp/install
+sed -i "/^add_library(lammps \${ALL_SOURCES})\$/a\\
+\\
+# --- SYCL (AdaptiveCpp) support for pair_d3sycl ---\\
+#find_package(AdaptiveCpp REQUIRED)\\
+\\
+# Find Intel oneAPI Base Toolkit\\
+if(NOT DEFINED ONEAPI_ROOT)\\
+    if(DEFINED ENV{ONEAPI_ROOT})\\
+        set(ONEAPI_ROOT $ENV{ONEAPI_ROOT})\\
+    elseif(WIN32)\\
+        set(ONEAPI_ROOT "C:/Program Files (x86)/Intel/oneAPI")\\
+    else()\\
+        set(ONEAPI_ROOT "/opt/intel/oneapi")\\
+    endif()\\
+endif()\\
+\\
+# Source Intel oneAPI environment if available\\
+if(WIN32 AND EXISTS "${ONEAPI_ROOT}/setvars.bat")\\
+    execute_process(\\
+        COMMAND cmd /d /c "call \"${ONEAPI_ROOT}/setvars.bat\" >nul 2>&1 && set"\\
+        OUTPUT_VARIABLE ONEAPI_ENV\\
+    )\\
+elseif(EXISTS "${ONEAPI_ROOT}/setvars.sh")\\
+    execute_process(\\
+        COMMAND bash -c "source ${ONEAPI_ROOT}/setvars.sh > /dev/null 2>&1 && env"\\
+        OUTPUT_VARIABLE ONEAPI_ENV\\
+    )\\
+endif()\\
+\\
+if(DEFINED ONEAPI_ENV)\\
+    string(REPLACE "\r\n" "\n" ONEAPI_ENV "${ONEAPI_ENV}")\\
+    string(REGEX MATCHALL "([^=\n]+)=([^\n]*)" ONEAPI_ENV_MATCHES "${ONEAPI_ENV}")\\
+    foreach(MATCH ${ONEAPI_ENV_MATCHES})\\
+        string(REGEX REPLACE "([^=\n]+)=([^\n]*)" "\\1" KEY "${MATCH}")\\
+        string(REGEX REPLACE "([^=\n]+)=([^\n]*)" "\\2" VALUE "${MATCH}")\\
+        set(ENV{${KEY}} ${VALUE})\\
+    endforeach()\\
+endif()\\
+\\
+# Check for Intel SYCL compiler\\
+if(CMAKE_CXX_COMPILER_ID MATCHES "IntelLLVM")\\
+    set(SYCL_COMPILER_FOUND TRUE)\\
+else()\\
+    if(WIN32)\\
+        find_program(SYCL_COMPILER NAMES icx icx-cl)\\
+    else()\\
+        find_program(SYCL_COMPILER icpx)\\
+    endif()\\
+    if(SYCL_COMPILER)\\
+        set(SYCL_COMPILER_FOUND TRUE)\\
+        set(CMAKE_CXX_COMPILER ${SYCL_COMPILER})\\
+    endif()\\
+endif()\\
+\\
+# SYCL_COMPILER_FOUND \\
+message(STATUS "Found SYCL compiler: ${CMAKE_CXX_COMPILER}")\\
+\\
+# Add SYCL include directories\\
+find_path(SYCL_INCLUDE_DIR\\
+    NAMES \\
+        "CL/sycl.hpp"\\
+        "sycl/sycl.hpp"\\
+    PATHS\\
+    "${ONEAPI_ROOT}/compiler/latest/linux/include"\\
+    "${ONEAPI_ROOT}/compiler/latest/include"\\
+    "/opt/intel/oneapi/compiler/latest/linux/include"\\
+    "/opt/intel/oneapi/compiler/latest/include"\\
+    "/usr/include"\\
+    "/usr/local/include"\\
+    ENV CPLUS_INCLUDE_PATH\\
+)\\
+\\
+message(STATUS "Found SYCL include directory: ${SYCL_INCLUDE_DIR}")\\
+include_directories(${SYCL_INCLUDE_DIR} ${SYCL_INCLUDE_DIR}/..)\\
+\\
+# Set SYCL-specific compiler flags\\
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsycl")\\
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsycl")\\
+\\
+\\
+add_sycl_to_target(TARGET lammps SOURCES \${LAMMPS_SOURCE_DIR}/pair_d3sycl.cpp)\\
+# --- SYCL (AdaptiveCpp) support for pair_d3sycl ---" $lammps_root/cmake/CMakeLists.txt
+fi
+
 ###########################################
 # Print changes and backup file locations #
 ###########################################
@@ -215,6 +327,14 @@ fi
 if [ "$d3_support" -ne 0 ]; then
     echo "  - Copied contents of pair_d3 to $lammps_root/src/"
     echo "  - Patched CMakeLists.txt: include CUDA"
+    echo
+fi
+if [ "$d3sycl_support" -ne 0 ]; then
+    echo "  - Copied pair_d3sycl.{h,cpp} (and pair_d3_pars.h, if missing) to $lammps_root/src/"
+    echo "  - Patched CMakeLists.txt: find_package(AdaptiveCpp), add_sycl_to_target(lammps)"
+    echo "  - Build requires AdaptiveCpp discoverable via CMAKE_PREFIX_PATH, e.g.:"
+    echo "      cmake -DCMAKE_PREFIX_PATH=/path/to/adaptivecpp/install -DACPP_TARGETS=generic ..."
+    echo "  - pair_style name: d3sycl (same arguments as pair_d3)"
     echo
 fi
 # Provide example cmake command to the user
