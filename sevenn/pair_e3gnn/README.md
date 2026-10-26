@@ -23,6 +23,37 @@ The target compute capability of this code follows the setting of LibTorch in Se
 
 You can manually select the target capability using the `TORCH_CUDA_ARCH_LIST` environment variable. For example, you can use: `export TORCH_CUDA_ARCH_LIST="6.1;7.0;8.0;8.6;8.9;9.0"`.
 
+### SYCL build (`d3sycl`)
+
+A SYCL port of this pair style, `d3sycl`, is also provided (`pair_d3sycl.h`/`pair_d3sycl.cpp`),
+built with [AdaptiveCpp](https://github.com/AdaptiveCpp/AdaptiveCpp) instead of raw CUDA. It
+implements the same math and accepts the same `pair_style`/`pair_coeff` arguments as `d3`
+(just substitute `d3sycl` for `d3`), so it can be used as a drop-in alternative on systems
+where a SYCL toolchain is preferred over (or more readily available than) CUDA/nvcc, while
+still running on NVIDIA GPUs via AdaptiveCpp's CUDA backend.
+
+To patch it in, pass `1` as the 6th `patch_lammps.sh` argument:
+```bash
+sh patch_lammps.sh ./lammps_sevenn 17 0 NONE NONE 1
+```
+and make sure AdaptiveCpp is discoverable when configuring LAMMPS:
+```bash
+cmake ../cmake \
+    -DCMAKE_PREFIX_PATH=/path/to/adaptivecpp/install \
+    -DACPP_TARGETS=generic
+```
+
+**`d3sycl` (SYCL) and `d3` (CUDA) cannot be patched into the same LAMMPS source tree** -- they
+use incompatible compilation flows (`add_sycl_to_target()` wraps the whole `lammps` target's
+compile rules, including the `.cu` files compiled by `nvcc` for `d3`). Patch each into its own
+LAMMPS checkout if you need both. `patch_lammps.sh` will refuse to proceed if both are
+requested at once.
+
+Internally, `d3sycl` flattens the nested device arrays used by the CUDA implementation into
+flat USM (`sycl::malloc_shared`) buffers, and uses `sycl::atomic_ref` adds in place of the CUDA
+version's block-local shared-memory reduction for the virial/dispersion-energy accumulation --
+simpler and numerically equivalent, at a small performance cost.
+
 ## Usage for LAMMPS
 
 You can use the D3 dispersion correction in LAMMPS with SevenNet through the `pair/hybrid` command:
@@ -50,6 +81,8 @@ Available `type_of_damping` are as follows:
 
 Available `name_of_functional` options are the same as in the original Fortran code. SevenNet-0 is trained on the 'PBE' functional, so you should specify 'pbe' in the script when using it. For other supporting functionals, check 'List of parametrized functionals' in [here](https://www.chemie.uni-bonn.de/grimme/de/software/dft-d3). We are actively updating the D3 parameters for other functionals, such as `r2scan` and `wb97m`.
 
+To use the SYCL build instead, substitute `d3sycl` for `d3` in both the `pair_style` and `pair_coeff` lines above; all arguments stay the same.
+
 ## Features
 - Selective(or no) periodic boundary condition: implemented, But only PBC/noPBC can be checked through original FORTRAN code; selective PBC cannot
 - 3-body term, n > 8 term: not implemented (as to VASP)
@@ -73,6 +106,7 @@ Available `name_of_functional` options are the same as in the original Fortran c
 ## Contributors
 - Hyungmin An: Ported the original Fortran D3 code to C++ with OpenMP and MPI.
 - Gijin Kim: Accelerated the C++ D3 code with OpenACC[^2] and CUDA, and currently maintains it.
+- @alvarovm:  `d3sycl`, SYCL (tested with AdaptiveCpp) port of the CUDA `d3` pair style.
 
 [^1]: On the [VASP DFT-D3](https://www.vasp.at/wiki/index.php/DFT-D3) page, the `VDW_RADIUS` and `VDW_CNRADIUS` are `50.2` and `20.0`, respectively (units are Å). However, when running VASP 6.3.2, the default values in the OUTCAR file are `50.2022` and `21.1671`. These values are the same as our defaults.
 [^2]: Since OpenACC is not compatible with libtorch, we chose to use the CUDA.
