@@ -21,7 +21,15 @@ def add_parser(subparsers):
 def add_args(parser):
     ag = parser
     ag.add_argument('lammps_dir', help='Path to LAMMPS source', type=str)
-    ag.add_argument('--d3', help='Enable D3 support', action='store_true')
+    d3_group = ag.add_mutually_exclusive_group()
+    d3_group.add_argument(
+        '--d3', help='Enable D3 support (CUDA: d3, d3/mpi)', action='store_true'
+    )
+    d3_group.add_argument(
+        '--d3sycl',
+        help='Enable D3 support (SYCL: d3sycl, d3sycl/mpi)',
+        action='store_true',
+    )
     ag.add_argument(
         '--flashTP',
         '--enable_flash',
@@ -49,10 +57,16 @@ def run(args):
 
     if args.d3:
         d3_support = '1'
-        print('  - D3 support enabled')
+        print('  - D3 support enabled (CUDA)')
     else:
         d3_support = '0'
-        print('  - D3 support disabled')
+        print('  - D3 support (CUDA) disabled')
+
+    if args.d3sycl:
+        d3sycl_support = '1'
+        print('  - D3 support enabled (SYCL)')
+    else:
+        d3sycl_support = '0'
 
     so_oeq = ''
     if args.enable_oeq:
@@ -111,6 +125,10 @@ def run(args):
     if args.enable_oeq:
         assert osp.isfile(so_oeq)
         cmd += f' {so_oeq}'
+    else:
+        cmd += ' NONE'
+
+    cmd += f' {d3sycl_support}'
 
     res = subprocess.run(cmd.split())
     return res.returncode  # is it meaningless?

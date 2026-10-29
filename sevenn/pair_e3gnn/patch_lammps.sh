@@ -5,7 +5,7 @@ cxx_standard=$2 # 14, 17
 d3_support=$3 # 1, 0
 flashTP_so="${4:-NONE}"
 oeq_so="${5:-NONE}"
-d3sycl_support="${6:-0}" # 1, 0 -- pair_d3sycl (SYCL port of pair_d3)
+d3sycl_support="${6:-0}" # 1, 0 -- pair_d3sycl, pair_d3sycl_mpi (SYCL ports of pair_d3, pair_d3_mpi)
 SCRIPT_DIR=$(dirname "${BASH_SOURCE[0]}")
 enable_flashTP=0
 enable_oeq=0
@@ -19,9 +19,19 @@ if [ "$#" -lt 3 ] || [ "$#" -gt 6 ]; then
     echo "Usage: sh patch_lammps.sh {lammps_root} {cxx_standard} {d3_support} {flashTP_so} {oeq_so} {d3sycl_support}"
     echo "  {lammps_root}: Root directory of LAMMPS source"
     echo "  {cxx_standard}: C++ standard (14, 17)"
-    echo "  {d3_support}: Support for pair_d3, CUDA (1, 0)"
-    echo "  {d3sycl_support}: Support for pair_d3sycl, SYCL (1, 0). Requires a SYCL compiler, such as AdaptiveCpp"
-    echo "                    to be discoverable via CMAKE_PREFIX_PATH at LAMMPS configure time."
+    echo "  {d3_support}: Support for pair_d3 and pair_d3_mpi (d3, d3/mpi), CUDA (1, 0)"
+    echo "  {d3sycl_support}: Support for pair_d3sycl and pair_d3sycl_mpi (d3sycl, d3sycl/mpi), SYCL (1, 0)."
+    echo "                    Requires a SYCL compiler at LAMMPS configure time: AdaptiveCpp (discoverable via CMAKE_PREFIX_PATH) or Intel oneAPI icpx"
+    echo "                    (CMAKE_CXX_COMPILER=icpx)."
+    exit 1
+fi
+
+if [ "$d3_support" -ne 0 ] && [ "$d3sycl_support" -ne 0 ]; then
+    echo "Error: d3_support (CUDA) and d3sycl_support (SYCL) cannot both be enabled"
+    echo "       in the same LAMMPS build. add_sycl_to_target() wraps the whole 'lammps'"
+    echo "       target's compile/link rules, including .cu files compiled by nvcc, which"
+    echo "       conflicts with the CUDA language build used by pair_d3. Patch two separate"
+    echo "       LAMMPS source trees instead, one per backend."
     exit 1
 fi
 
@@ -34,6 +44,12 @@ fi
 # Check if the given directory is the root of LAMMPS source
 if [ ! -d "$lammps_root/cmake" ] && [ ! -d "$lammps_root/potentials" ]; then
     echo "Error: Given $lammps_root is not a root of LAMMPS source"
+    exit 1
+fi
+
+# pair_d3sycl's CMake block is inserted right after this line
+if [ "$d3sycl_support" -ne 0 ] && ! grep -q '^add_library(lammps ${ALL_SOURCES})$' $lammps_root/cmake/CMakeLists.txt; then
+    echo "Error: 'add_library(lammps \${ALL_SOURCES})' not found in $lammps_root/cmake/CMakeLists.txt"
     exit 1
 fi
 
@@ -177,8 +193,8 @@ fi
 if [ "$d3_support" -ne 0 ]; then
 
 # 1. Copy pair_d3 files to LAMMPS source
-cp $SCRIPT_DIR/pair_d3.cu $lammps_root/src/
-cp $SCRIPT_DIR/pair_d3.h $lammps_root/src/
+cp $SCRIPT_DIR/{pair_d3,pair_d3_mpi}.cu $lammps_root/src/
+cp $SCRIPT_DIR/{pair_d3,pair_d3_mpi}.h $lammps_root/src/
 cp $SCRIPT_DIR/pair_d3_pars.h $lammps_root/src/
 
 # 2. Patch cmake/CMakeLists.txt
@@ -194,15 +210,6 @@ EOF
 
 fi
 
-if [ "$d3_support" -ne 0 ] && [ "$d3sycl_support" -ne 0 ]; then
-    echo "Error: d3_support (CUDA) and d3sycl_support (SYCL) cannot both be enabled"
-    echo "       in the same LAMMPS build. add_sycl_to_target() wraps the whole 'lammps'"
-    echo "       target's compile/link rules, including .cu files compiled by nvcc, which"
-    echo "       conflicts with the CUDA language build used by pair_d3. Patch two separate"
-    echo "       LAMMPS source trees instead, one per backend."
-    exit 1
-fi
-
 ###########################################
 # Patch LAMMPS source code: d3sycl        #
 ###########################################
@@ -210,8 +217,8 @@ fi
 if [ "$d3sycl_support" -ne 0 ]; then
 
 # 1. Copy pair_d3sycl files to LAMMPS source
-cp $SCRIPT_DIR/pair_d3sycl.h $lammps_root/src/
-cp $SCRIPT_DIR/pair_d3sycl.cpp $lammps_root/src/
+cp $SCRIPT_DIR/{pair_d3sycl,pair_d3sycl_mpi}.h $lammps_root/src/
+cp $SCRIPT_DIR/{pair_d3sycl,pair_d3sycl_mpi}.cpp $lammps_root/src/
 if [ ! -f "$lammps_root/src/pair_d3_pars.h" ]; then
     cp $SCRIPT_DIR/pair_d3_pars.h $lammps_root/src/
 fi
@@ -299,7 +306,9 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsycl")\\
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsycl")\\
 \\
 \\
-add_sycl_to_target(TARGET lammps SOURCES \${LAMMPS_SOURCE_DIR}/pair_d3sycl.cpp)\\
+#add_sycl_to_target(TARGET lammps SOURCES \${LAMMPS_SOURCE_DIR}/pair_d3sycl.cpp)\\
+add_sycl_to_target(TARGET lammps SOURCES \${LAMMPS_SOURCE_DIR}/pair_d3sycl.cpp\\
+                                           \${LAMMPS_SOURCE_DIR}/pair_d3sycl_mpi.cpp)\\
 # --- SYCL (AdaptiveCpp) support for pair_d3sycl ---" $lammps_root/cmake/CMakeLists.txt
 fi
 
@@ -325,16 +334,18 @@ if [ "$enable_oeq" -eq 1 ]; then
     echo
 fi
 if [ "$d3_support" -ne 0 ]; then
-    echo "  - Copied contents of pair_d3 to $lammps_root/src/"
+    echo "  - Copied pair_d3.{h,cu}, pair_d3_mpi.{h,cu} and pair_d3_pars.h to $lammps_root/src/"
+    echo "  - pair_style names: d3 (single MPI rank only), d3/mpi (multi-rank / multi-GPU)"
     echo "  - Patched CMakeLists.txt: include CUDA"
     echo
 fi
 if [ "$d3sycl_support" -ne 0 ]; then
-    echo "  - Copied pair_d3sycl.{h,cpp} (and pair_d3_pars.h, if missing) to $lammps_root/src/"
-    echo "  - Patched CMakeLists.txt: find_package(AdaptiveCpp), add_sycl_to_target(lammps)"
-    echo "  - Build requires AdaptiveCpp discoverable via CMAKE_PREFIX_PATH, e.g.:"
-    echo "      cmake -DCMAKE_PREFIX_PATH=/path/to/adaptivecpp/install -DACPP_TARGETS=generic ..."
-    echo "  - pair_style name: d3sycl (same arguments as pair_d3)"
+    echo "  - Copied pair_d3sycl.{h,cpp}, pair_d3sycl_mpi.{h,cpp} (and pair_d3_pars.h, if missing) to $lammps_root/src/"
+    echo "  - Patched CMakeLists.txt: SYCL build of the lammps target (AdaptiveCpp or Intel icpx)"
+    echo "  - Build requires a SYCL compiler at configure time, e.g.:"
+    echo "      AdaptiveCpp: cmake -DCMAKE_PREFIX_PATH=/path/to/adaptivecpp/install -DACPP_TARGETS=generic ..."
+    echo "      Intel oneAPI: source /opt/intel/oneapi/setvars.sh; cmake -DCMAKE_CXX_COMPILER=icpx ..."
+    echo "  - pair_style names: d3sycl (single MPI rank only), d3sycl/mpi (multi-rank / multi-GPU); same arguments as d3"
     echo
 fi
 # Provide example cmake command to the user
